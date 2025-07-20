@@ -18,7 +18,7 @@ void TCPReceiver::segment_received(const TCPSegment &seg) {
     start_ = true;
     zero_point_ = seqno;
     // add 1 to indicate the byte following syn
-    seqno = WrappingInt32(seqno.raw_value() + 1);
+    seqno = seqno + 1;
   }
   if ( header.rst ) {
     start_ = false;
@@ -26,7 +26,7 @@ void TCPReceiver::segment_received(const TCPSegment &seg) {
     stream_out().set_error();
   }
   if ( start_ ) {
-    seqno = WrappingInt32(seqno.raw_value() - 1);
+    seqno = seqno - 1;
     // use the first unassembled byte as checkpoint
     uint64_t checkpoint = _reassembler.acknum();
     _reassembler.push_substring( seg.payload().copy(), 
