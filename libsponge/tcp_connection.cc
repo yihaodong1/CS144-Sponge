@@ -23,6 +23,7 @@ void TCPConnection:: add_ackno_and_win_size(){
     seg.header().win = _receiver.window_size() > UINT16_MAX? UINT16_MAX: _receiver.window_size();
     _segments_out.emplace(std::move(seg));
   }
+  // clean shutdown
   if (_receiver.stream_out().input_ended()) {
     if (!_sender.stream_in().eof())
       _linger_after_streams_finish = false;
@@ -54,53 +55,48 @@ void TCPConnection::segment_received(const TCPSegment &seg) {
   if(!_active)
     return;
   _time_last_seg_receive = 0;
+  if(seg.header().rst){
+    if(TCPState(_sender, _receiver, _active, _linger_after_streams_finish)
+        == TCPState(TCPState::State::LISTEN))
+      return;
+    // for syn_sent,
+    // good ACK with RST should result in a RESET but no RST segment sent
+    if(TCPState(_sender, _receiver, _active, _linger_after_streams_finish)
+        == TCPState(TCPState::State::SYN_SENT)){
+      _sender.segments_out() = queue<TCPSegment>();
 
-  // State: LISTEN
-  if(TCPState(_sender, _receiver, _active, _linger_after_streams_finish)
-      == TCPState(TCPState::State::LISTEN)){
-        if (!seg.header().syn)
-            return;
-        _receiver.segment_received(seg);
-        connect();
-        return;
+      _receiver.stream_out().set_error();
+      _sender.stream_in().set_error();
+      _active = false;
+      return;
     }
-    // State: syn sent
-  if(TCPState(_sender, _receiver, _active, _linger_after_streams_finish)
-    == TCPState(TCPState::State::SYN_SENT)){
-      if (seg.payload().size())
-          return;
-      if (!seg.header().ack) {
-          if (seg.header().syn) {
-              // simultaneous open
-              _receiver.segment_received(seg);
-              _sender.send_empty_segment();
-          }
-          return;
-      }
-      if (seg.header().rst) {
-          _receiver.stream_out().set_error();
-          _sender.stream_in().set_error();
-          _active = false;
-          return;
-      }
-  }
-
-  _receiver.segment_received(seg);
-  if(seg.header().ack)
-  _sender.ack_received(seg.header().ackno, seg.header().win);
-  // Lab3 behavior: fill_window() will directly return without sending any segment.
-  if (_sender.segments_out().empty() && seg.length_in_sequence_space())
-      _sender.send_empty_segment();
-  if (seg.header().rst) {
     _sender.segments_out() = queue<TCPSegment>();
 
     _receiver.stream_out().set_error();
     _sender.stream_in().set_error();
     _active = false;
     _sender.send_empty_segment();
+  }else{
+    if(TCPState(_sender, _receiver, _active, _linger_after_streams_finish)
+        == TCPState(TCPState::State::LISTEN)){
+      if (!seg.header().syn)
+        return;
+      _receiver.segment_received(seg);
+      // receive syn, then send ack + syn
+      connect();
+      return;
+    }
+    _receiver.segment_received(seg);
+    if(seg.header().ack)
+      _sender.ack_received(seg.header().ackno, seg.header().win);
+    if (_receiver.ackno().has_value() && (seg.length_in_sequence_space() == 0)
+        && seg.header().seqno == _receiver.ackno().value() - 1) {
+      _sender.send_empty_segment();
+    }
+    if(_sender.segments_out().empty() && seg.length_in_sequence_space())
+      _sender.send_empty_segment();
   }
   add_ackno_and_win_size();
-
 
 }
 
@@ -132,11 +128,6 @@ void TCPConnection::tick(const size_t ms_since_last_tick) {
     _active = false;
     _sender.send_empty_segment();
   }
-  // TODO: end connection cleanly
-  if(TCPState(_sender, _receiver, _active, _linger_after_streams_finish)
-      == TCPState(TCPState::State::TIME_WAIT)
-      && time_since_last_segment_received() >= 10 * _cfg.rt_timeout)
-      _active = false;
   add_ackno_and_win_size();
 }
 
