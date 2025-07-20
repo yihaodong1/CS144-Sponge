@@ -27,8 +27,6 @@ class TCPConnection {
 
     void add_ackno_and_win_size();
 
-    uint64_t _current = 0;
-
   public:
     //! \name "Input" interface for the writer
     //!@{

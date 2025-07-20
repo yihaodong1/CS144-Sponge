@@ -23,6 +23,15 @@ void TCPConnection:: add_ackno_and_win_size(){
     seg.header().win = _receiver.window_size() > UINT16_MAX? UINT16_MAX: _receiver.window_size();
     _segments_out.emplace(std::move(seg));
   }
+  if (_receiver.stream_out().input_ended()) {
+    if (!_sender.stream_in().eof())
+      _linger_after_streams_finish = false;
+    else if (_sender.bytes_in_flight() == 0) {
+      if (!_linger_after_streams_finish || time_since_last_segment_received() >= 10 * _cfg.rt_timeout) {
+        _active = false;
+      }
+    }
+  }
 }
 size_t TCPConnection::remaining_outbound_capacity() const {
   return _sender.stream_in().remaining_capacity();
@@ -37,93 +46,61 @@ size_t TCPConnection::unassembled_bytes() const {
 }
 
 size_t TCPConnection::time_since_last_segment_received() const {
-  return _current - _time_last_seg_receive;
+  return _time_last_seg_receive;
 }
 
 void TCPConnection::segment_received(const TCPSegment &seg) {
 
-  _time_last_seg_receive = _current;
-  if(seg.header().rst){
-    _sender.stream_in().set_error();
-    _receiver.stream_out().set_error();
-    _active = false;
+  if(!_active)
     return;
-  }
-  // cout<<TCPState::state_summary(_sender)<<endl;
-  // cout<<TCPState::state_summary(_receiver)<<endl;
-  // cout<<seg.header().ack<<seg.header().syn<<endl;
+  _time_last_seg_receive = 0;
+
+  // State: LISTEN
   if(TCPState(_sender, _receiver, _active, _linger_after_streams_finish)
-      == TCPState(TCPState::State::LISTEN)
-      && seg.header().syn){
-    _receiver.segment_received(seg);
-    _sender.fill_window();// receive syn then send syn+ack
-  }
-  else if(TCPState(_sender, _receiver, _active, _linger_after_streams_finish)
-      == TCPState(TCPState::State::SYN_SENT)
-      && seg.header().syn){
-    _receiver.segment_received(seg);
-    if(seg.header().ack){
-      _sender.ack_received(seg.header().ackno, seg.header().win);
-    }else
-      _sender.fill_window();// receive syn then send syn+ack(simultanenously open)
-  }
-  else if(TCPState(_sender, _receiver, _active, _linger_after_streams_finish)
-      == TCPState(TCPState::State::SYN_RCVD)
-      && seg.header().ack){
-    _receiver.segment_received(seg);
-    _sender.ack_received(seg.header().ackno, seg.header().win);
-  }
-  else if(TCPState(_sender, _receiver, _active, _linger_after_streams_finish)
-      == TCPState(TCPState::State::ESTABLISHED)){
-    _receiver.segment_received(seg);
-    if(seg.header().ack)
-      _sender.ack_received(seg.header().ackno, seg.header().win);
-    _sender.fill_window();
-    _linger_after_streams_finish = !seg.header().fin;
-    
-  }
-  else if(TCPState(_sender, _receiver, _active, _linger_after_streams_finish)
-      == TCPState(TCPState::State::CLOSE_WAIT)){
-    _receiver.segment_received(seg);
-    if(seg.header().ack)
-      _sender.ack_received(seg.header().ackno, seg.header().win);
-    _sender.fill_window();
-  }
-  else if(TCPState(_sender, _receiver, _active, _linger_after_streams_finish)
-      == TCPState(TCPState::State::LAST_ACK)
-    && seg.header().ack){
-    _receiver.segment_received(seg);
-    // check whether the ack_received is in effective
-    size_t ini = _sender.bytes_in_flight();
-    _sender.ack_received(seg.header().ackno, seg.header().win);
-    if(ini > _sender.bytes_in_flight())
-      _active = false;
-  }
-  else if(TCPState(_sender, _receiver, _active, _linger_after_streams_finish)
-      == TCPState(TCPState::State::FIN_WAIT_1)){
-    _receiver.segment_received(seg);
-    if(seg.header().ack )
-      _sender.ack_received(seg.header().ackno, seg.header().win);
-    if(seg.header().fin){
+      == TCPState(TCPState::State::LISTEN)){
+        if (!seg.header().syn)
+            return;
+        _receiver.segment_received(seg);
+        connect();
+        return;
     }
-  }
-  else if(TCPState(_sender, _receiver, _active, _linger_after_streams_finish)
-      == TCPState(TCPState::State::FIN_WAIT_2)
-      && seg.header().fin){
-    _receiver.segment_received(seg);
-  }
-  else if(TCPState(_sender, _receiver, _active, _linger_after_streams_finish)
-      == TCPState(TCPState::State::CLOSING)
-      && seg.header().ack){
-    _receiver.segment_received(seg);
-    _sender.ack_received(seg.header().ackno, seg.header().win);
+    // State: syn sent
+  if(TCPState(_sender, _receiver, _active, _linger_after_streams_finish)
+    == TCPState(TCPState::State::SYN_SENT)){
+      if (seg.payload().size())
+          return;
+      if (!seg.header().ack) {
+          if (seg.header().syn) {
+              // simultaneous open
+              _receiver.segment_received(seg);
+              _sender.send_empty_segment();
+          }
+          return;
+      }
+      if (seg.header().rst) {
+          _receiver.stream_out().set_error();
+          _sender.stream_in().set_error();
+          _active = false;
+          return;
+      }
   }
 
-    // TODO: make sure at least one reply
-  if(_sender.segments_out().empty() && seg.length_in_sequence_space()){
+  _receiver.segment_received(seg);
+  if(seg.header().ack)
+  _sender.ack_received(seg.header().ackno, seg.header().win);
+  // Lab3 behavior: fill_window() will directly return without sending any segment.
+  if (_sender.segments_out().empty() && seg.length_in_sequence_space())
+      _sender.send_empty_segment();
+  if (seg.header().rst) {
+    _sender.segments_out() = queue<TCPSegment>();
+
+    _receiver.stream_out().set_error();
+    _sender.stream_in().set_error();
+    _active = false;
     _sender.send_empty_segment();
   }
   add_ackno_and_win_size();
+
 
 }
 
@@ -139,8 +116,10 @@ size_t TCPConnection::write(const string &data) {
 
 //! \param[in] ms_since_last_tick number of milliseconds since the last call to this method
 void TCPConnection::tick(const size_t ms_since_last_tick) {
+  if(!_active)
+    return;
   _sender.tick(ms_since_last_tick);
-  _current += ms_since_last_tick;
+  _time_last_seg_receive += ms_since_last_tick;
   if(_sender.consecutive_retransmissions() > TCPConfig::MAX_RETX_ATTEMPTS){
     // abort the connection, and send a reset segment to the peer (an empty segment with
     // the rst flag set)
