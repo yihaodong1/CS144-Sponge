@@ -21,7 +21,7 @@ void get_URL(const string &host, const string &path) {
     // cerr << "Function called: get_URL(" << host << ", " << path << ").\n";
     // cerr << "Warning: get_URL() has not been implemented yet.\n";
     // TCPSocket t;
-    CS144TCPSocket t;
+    FullStackSocket t;
     t.connect( Address( host, "http" ) );
     t.write( "GET " + path + " HTTP/1.1\r\n" );
     t.write( "Host: " + host + "\r\n" );

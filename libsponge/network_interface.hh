@@ -7,6 +7,8 @@
 
 #include <optional>
 #include <queue>
+#include <map>
+#include <set>
 
 //! \brief A "network interface" that connects IP (the internet layer, or network layer)
 //! with Ethernet (the network access layer, or link layer).
@@ -39,6 +41,39 @@ class NetworkInterface {
 
     //! outbound queue of Ethernet frames that the NetworkInterface wants sent
     std::queue<EthernetFrame> _frames_out{};
+
+    uint64_t _current{};
+    
+    std::map<uint32_t, uint64_t> _time_table{};
+
+    std::map<uint32_t, InternetDatagram> _dgram_table{};
+
+    struct ExpireItem;
+    struct EthItem{
+      EthernetAddress addr{};
+      std::multiset<ExpireItem,std::less<ExpireItem>>::iterator ptr{};
+      EthItem() = default;
+      EthItem(const EthernetAddress& a, std::multiset<ExpireItem>::iterator p)
+        : addr(a), ptr(p) {}
+      // EtheItem(const EthernetAddress& a, std::multiset<ExpireItem>::iterator p)
+      //   : addr(a), ptr(p) {}
+    };
+
+    std::map<uint32_t, EthItem> _ip_to_eth_table{};
+
+    struct ExpireItem{
+      uint32_t _ip;
+      uint64_t _time;
+      ExpireItem(uint32_t ip, uint64_t time):_ip(ip), _time(time){};
+      bool operator < (const ExpireItem &other)const{
+         // multiset 允许重复值时，加上 ip 作为 tie-breaker
+        return _time < other._time || (_time == other._time && _ip < other._ip);
+      }
+    };
+
+    std::multiset<ExpireItem,std::less<ExpireItem>> _expire_table{};
+
+    void refresh(std::optional<uint32_t> ip_address, std::optional<EthernetAddress> eth_address);
 
   public:
     //! \brief Construct a network interface with given Ethernet (network-access-layer) and IP (internet-layer) addresses
